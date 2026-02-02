@@ -1,3 +1,5 @@
+#![no_std]
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Error {
     InvalidDataLength,
