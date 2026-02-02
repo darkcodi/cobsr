@@ -67,6 +67,71 @@ pub fn cobs_encode_in_place(buf: &mut [u8], len: usize) -> Result<usize, Error> 
     Ok(len + overhead_bytes_count)
 }
 
+pub fn cobs_decode_in_place(buf: &mut [u8], len: usize) -> Result<usize, Error> {
+    if len == 0 {
+        return Err(Error::InvalidDataLength);
+    }
+    if buf.len() < len {
+        return Err(Error::BufferTooSmall);
+    }
+
+    let mut read_idx = 0;
+    let mut write_idx = 0;
+    let mut last_overhead: Option<u8> = None;
+
+    while read_idx < len {
+        // Read overhead byte
+        let overhead = buf[read_idx];
+        read_idx += 1;
+
+        // Zero overhead is invalid
+        if overhead == 0 {
+            return Err(Error::InvalidDataLength);
+        }
+
+        // Determine how many bytes to copy
+        let copy_len = if overhead == 255 {
+            254
+        } else {
+            (overhead - 1) as usize
+        };
+
+        // Validate we have enough data
+        if read_idx + copy_len > len {
+            return Err(Error::InvalidDataLength);
+        }
+
+        // Copy data bytes
+        for _ in 0..copy_len {
+            buf[write_idx] = buf[read_idx];
+            write_idx += 1;
+            read_idx += 1;
+        }
+
+        // Write zero after segment (unless overhead was 255)
+        if overhead != 255 {
+            buf[write_idx] = 0;
+            write_idx += 1;
+        }
+
+        last_overhead = Some(overhead);
+    }
+
+    // Remove the trailing zero that corresponds to the virtual zero added during encoding
+    // The last overhead byte indicates the distance to the virtual zero at the end
+    if last_overhead == Some(1) {
+        // Last overhead was 1, meaning "0 bytes + virtual zero", so remove the trailing zero
+        write_idx -= 1;
+    } else if last_overhead.is_some() && last_overhead != Some(255) {
+        // Last overhead was N (where 2 <= N <= 254), meaning "(N-1) bytes + virtual zero"
+        // Remove the trailing zero
+        write_idx -= 1;
+    }
+    // If last overhead was 255, no zero was written, so nothing to remove
+
+    Ok(write_idx)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,5 +194,98 @@ mod tests {
     #[test]
     fn encode_example_a() {
         encode_test::<10>("2F A2 00 92 73 02", "03 2F A2 04 92 73 02");
+    }
+
+    fn decode_test<const N: usize>(encoded: &str, decoded: &str) {
+        let (mut buf, encoded_len) = generate_buffer::<N>(encoded);
+        let (expected_buf, expected_len) = generate_buffer::<N>(decoded);
+        let decode_result = cobs_decode_in_place(&mut buf, encoded_len);
+        assert!(decode_result.is_ok());
+        let decoded_len = decode_result.unwrap();
+        assert_eq!(decoded_len, expected_len);
+        assert_eq!(buf[..decoded_len], expected_buf[..expected_len]);
+    }
+
+    fn roundtrip_test<const N: usize>(original: &str) {
+        let (mut buf, original_len) = generate_buffer::<N>(original);
+        let expected = buf[..original_len].to_vec();
+
+        // Encode
+        let encode_result = cobs_encode_in_place(&mut buf, original_len);
+        assert!(encode_result.is_ok());
+        let encoded_len = encode_result.unwrap();
+
+        // Decode
+        let decode_result = cobs_decode_in_place(&mut buf, encoded_len);
+        assert!(decode_result.is_ok());
+        let decoded_len = decode_result.unwrap();
+
+        // Verify
+        assert_eq!(decoded_len, original_len);
+        assert_eq!(buf[..decoded_len], expected[..original_len]);
+    }
+
+    #[test]
+    fn decode_wiki_tests() {
+        decode_test::<3>("01 01", "00");
+        decode_test::<4>("01 01 01", "00 00");
+        decode_test::<5>("01 02 11 01", "00 11 00");
+        decode_test::<6>("03 11 22 02 33", "11 22 00 33");
+        decode_test::<6>("05 11 22 33 44", "11 22 33 44");
+        decode_test::<6>("02 11 01 01 01", "11 00 00 00");
+    }
+
+    #[test]
+    fn decode_example_a() {
+        decode_test::<10>("03 2F A2 04 92 73 02", "2F A2 00 92 73 02");
+    }
+
+    #[test]
+    fn roundtrip_wiki_tests() {
+        roundtrip_test::<3>("00");
+        roundtrip_test::<4>("00 00");
+        roundtrip_test::<5>("00 11 00");
+        roundtrip_test::<6>("11 22 00 33");
+        roundtrip_test::<6>("11 22 33 44");
+        roundtrip_test::<6>("11 00 00 00");
+    }
+
+    #[test]
+    fn roundtrip_254_bytes() {
+        roundtrip_test::<300>("01 02 03 ... FD FE");
+    }
+
+    #[test]
+    fn roundtrip_255_bytes() {
+        roundtrip_test::<300>("01 02 03 ... FD FE FF");
+    }
+
+    #[test]
+    fn decode_error_empty_input() {
+        let mut buf = [0u8; 10];
+        let result = cobs_decode_in_place(&mut buf, 0);
+        assert_eq!(result, Err(Error::InvalidDataLength));
+    }
+
+    #[test]
+    fn decode_error_zero_overhead() {
+        let mut buf = [0x00, 0x11, 0x22];
+        let result = cobs_decode_in_place(&mut buf, 3);
+        assert_eq!(result, Err(Error::InvalidDataLength));
+    }
+
+    #[test]
+    fn decode_error_truncated_data() {
+        // Overhead says 5 bytes but only 2 available
+        let mut buf = [0x06, 0x11, 0x22];
+        let result = cobs_decode_in_place(&mut buf, 3);
+        assert_eq!(result, Err(Error::InvalidDataLength));
+    }
+
+    #[test]
+    fn decode_error_buffer_too_small() {
+        let mut buf = [0u8; 2];
+        let result = cobs_decode_in_place(&mut buf, 5);
+        assert_eq!(result, Err(Error::BufferTooSmall));
     }
 }
