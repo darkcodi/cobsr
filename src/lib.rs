@@ -28,6 +28,12 @@ pub fn cobs_encode_in_place(buf: &mut [u8], len: usize) -> Result<usize, Error> 
     while index <= len + overhead_bytes_count {
         bytes_till_next_zero += 1;
         let is_last_iteration = index == len + overhead_bytes_count;
+        if bytes_till_next_zero == 255 && !is_last_iteration {
+            // we have a group of 254 non-zero bytes in a row, insert extra 00 at this index
+            buf[index..].rotate_right(1);
+            buf[index] = 0;
+            overhead_bytes_count += 1;
+        }
         let byte = if is_last_iteration {
             // last virtual byte is always 0
             0
@@ -44,7 +50,7 @@ pub fn cobs_encode_in_place(buf: &mut [u8], len: usize) -> Result<usize, Error> 
                 }
                 None => {
                     // we have to insert overhead byte at the beginning
-                    buf[0..].rotate_right(1);
+                    buf.rotate_right(1);
                     buf[0] = bytes_till_next_zero;
                     bytes_till_next_zero = 0;
                     overhead_bytes_count += 1;
@@ -52,14 +58,6 @@ pub fn cobs_encode_in_place(buf: &mut [u8], len: usize) -> Result<usize, Error> 
                     previous_zero_index = Some(index);
                 }
             }
-        } else if bytes_till_next_zero == 255 {
-            // we have a group of 254 non-zero bytes in a row, insert extra 00 at this index
-            buf[index..].rotate_right(1);
-            buf[index] = 0;
-            overhead_bytes_count += 1;
-            // we'll reprocess this position again
-            bytes_till_next_zero -= 1;
-            index -= 1;
         }
         index += 1;
     }
@@ -198,12 +196,10 @@ mod tests {
             buf[i - 2] = i as u8;
         }
         buf[254] = 0x00;
-        eprintln!("BUF BEFORE: {:?}", &buf);
         let len = 255;
         let encode_result = cobs_encode_in_place(&mut buf, len);
         assert!(encode_result.is_ok());
         let new_len = encode_result.unwrap();
-        eprintln!("BUF AFTER: {:?}", &buf);
         assert_eq!(new_len, 257);
         assert_eq!(buf[0], 0xFF);
         for i in 0x02..=0xFF {
@@ -211,6 +207,27 @@ mod tests {
         }
         assert_eq!(buf[255], 0x01);
         assert_eq!(buf[256], 0x01);
+    }
+
+    #[test]
+    fn encode_wiki11() {
+        let mut buf = [0; 300];
+        for i in 0x03..=0xFF {
+            buf[i - 3] = i as u8;
+        }
+        buf[253] = 0x00;
+        buf[254] = 0x01;
+        let len = 255;
+        let encode_result = cobs_encode_in_place(&mut buf, len);
+        assert!(encode_result.is_ok());
+        let new_len = encode_result.unwrap();
+        assert_eq!(new_len, 256);
+        assert_eq!(buf[0], 0xFE);
+        for i in 0x03..=0xFF {
+            assert_eq!(buf[i - 2], i as u8);
+        }
+        assert_eq!(buf[254], 0x02);
+        assert_eq!(buf[255], 0x01);
     }
 
     #[test]
