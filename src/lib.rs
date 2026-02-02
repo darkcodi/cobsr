@@ -14,6 +14,29 @@ pub fn required_buf_len(buf_len: usize) -> usize {
     buf_len + max_overhead(buf_len) + 1
 }
 
+/// Encodes data in-place using COBS (Consistent Overhead Byte Stuffing) algorithm.
+///
+/// # Algorithm Overview
+/// COBS replaces all zero bytes in the input with overhead bytes that indicate
+/// the distance to the next zero byte. This ensures the encoded output contains
+/// no zero bytes, making it suitable for packet-based protocols.
+///
+/// # How it Works
+/// 1. Scan through the input looking for zero bytes
+/// 2. Replace each zero byte with an overhead byte (1-254, or 255 for special case)
+/// 3. The overhead byte indicates how many bytes follow until the next zero
+/// 4. A "virtual zero" is treated as existing at the end of the input
+///
+/// # Special Cases
+/// - Overhead value 255: Indicates 254 non-zero bytes, another overhead follows
+/// - Overhead value N (1-254): Indicates N-1 data bytes, then a zero
+/// - Sequences of 254+ non-zero bytes trigger additional 255 overhead bytes
+///
+/// # In-Place Encoding
+/// This function modifies the buffer in-place by:
+/// - Rotating bytes right to make room for overhead bytes
+/// - Tracking how many overhead bytes have been inserted (expands the data)
+/// - Returning the new encoded length
 pub fn cobs_encode_in_place(buf: &mut [u8], len: usize) -> Result<usize, Error> {
     if len == 0 {
         return Err(Error::InvalidDataLength);
@@ -22,41 +45,60 @@ pub fn cobs_encode_in_place(buf: &mut [u8], len: usize) -> Result<usize, Error> 
         return Err(Error::BufferTooSmall);
     }
 
+    // Current position in the buffer while scanning
     let mut index: usize = 0;
+    // Position of the last overhead byte that needs to be updated
     let mut previous_zero_index: Option<usize> = None;
+    // Counter for bytes until the next zero (includes the zero itself)
     let mut bytes_till_next_zero: u8 = 0;
+    // How many overhead bytes have been inserted (buffer grows as we encode)
     let mut overhead_bytes_count: usize = 0;
 
+    // Process all bytes plus the virtual zero at the end
+    // Note: we iterate while <= because we need to process the virtual zero
     while index <= len + overhead_bytes_count {
         bytes_till_next_zero += 1;
         let is_last_iteration = index == len + overhead_bytes_count;
+
+        // Special case: we've accumulated 254 non-zero bytes
+        // COBS can only encode 254 bytes in one block, so we need to insert
+        // a 255 overhead byte to signal "more non-zero bytes follow"
         if bytes_till_next_zero == 255 && !is_last_iteration {
-            // we have a group of 254 non-zero bytes in a row, insert extra 00 at this index
+            // Insert a 0xFF (255) overhead byte at the current position
+            // This will be replaced with 255 when we encounter the next zero
             buf[index..].rotate_right(1);
             buf[index] = 0;
             overhead_bytes_count += 1;
         }
+
+        // Get the current byte (or virtual zero at the end)
         let byte = if is_last_iteration {
-            // last virtual byte is always 0
+            // The virtual zero at the end of input ensures the last segment gets encoded
             0
         } else {
             buf[index]
         };
+
+        // When we encounter a zero byte (real or virtual), we need to encode
+        // the distance from the previous zero (or start) to this zero
         if byte == 0 {
             match previous_zero_index {
                 Some(prev_index) => {
-                    // no need to insert overhead byte here, just update the previous zero index
+                    // We've seen a zero before, so there's already an overhead byte
+                    // placeholder at prev_index. Update it with the actual distance.
                     buf[prev_index] = bytes_till_next_zero;
                     bytes_till_next_zero = 0;
                     previous_zero_index = Some(index);
                 }
                 None => {
-                    // we have to insert overhead byte at the beginning
+                    // This is the first zero we've encountered.
+                    // We need to insert an overhead byte at the beginning of the buffer.
                     buf.rotate_right(1);
                     buf[0] = bytes_till_next_zero;
                     bytes_till_next_zero = 0;
                     overhead_bytes_count += 1;
-                    index += 1; // we moved everything 1 byte right, so we have to increment it to point to the same position
+                    // Everything shifted right by 1, so increment index to stay at same position
+                    index += 1;
                     previous_zero_index = Some(index);
                 }
             }
@@ -64,9 +106,35 @@ pub fn cobs_encode_in_place(buf: &mut [u8], len: usize) -> Result<usize, Error> 
         index += 1;
     }
 
+    // Return the new encoded length (original length + inserted overhead bytes)
     Ok(len + overhead_bytes_count)
 }
 
+/// Decodes COBS-encoded data in-place, reversing the encoding process.
+///
+/// # Algorithm Overview
+/// COBS decoding reconstructs the original data by:
+/// 1. Reading overhead bytes that indicate how many data bytes follow
+/// 2. Copying those bytes to the output position
+/// 3. Writing a zero byte (except for special cases)
+/// 4. Repeating until all encoded data is consumed
+///
+/// # How it Works
+/// - Each overhead byte (1-254) indicates: "copy N-1 bytes, then write a zero"
+/// - Overhead byte 255 is special: "copy 254 bytes, another overhead follows"
+/// - Since encoding shrinks the data (removes overhead bytes), we can safely
+///   read from ahead and write to earlier positions without overwriting data
+///
+/// # The Virtual Zero
+/// During encoding, a "virtual zero" is treated as existing at the end.
+/// This ensures the last segment gets encoded properly. During decoding,
+/// we must detect and remove this trailing zero to match the original input.
+///
+/// # In-Place Decoding
+/// This function modifies the buffer in-place by:
+/// - Reading from the end (encoded data) and writing to the front
+/// - Maintaining separate read_idx and write_idx positions
+/// - write_idx is always <= read_idx, ensuring no data is overwritten
 pub fn cobs_decode_in_place(buf: &mut [u8], len: usize) -> Result<usize, Error> {
     if len == 0 {
         return Err(Error::InvalidDataLength);
@@ -75,40 +143,46 @@ pub fn cobs_decode_in_place(buf: &mut [u8], len: usize) -> Result<usize, Error> 
         return Err(Error::BufferTooSmall);
     }
 
+    // Position we're reading from in the encoded stream
     let mut read_idx = 0;
+    // Position we're writing to in the decoded stream
     let mut write_idx = 0;
+    // Track the last overhead byte to detect virtual zero
     let mut last_overhead: Option<u8> = None;
 
     while read_idx < len {
-        // Read overhead byte
+        // Read the overhead byte that tells us how many data bytes follow
         let overhead = buf[read_idx];
         read_idx += 1;
 
-        // Zero overhead is invalid
+        // Zero overhead bytes are invalid in COBS encoding
         if overhead == 0 {
             return Err(Error::InvalidDataLength);
         }
 
-        // Determine how many bytes to copy
+        // Determine how many bytes to copy based on the overhead value
         let copy_len = if overhead == 255 {
+            // Special case: 255 means "254 non-zero bytes, no zero after"
             254
         } else {
+            // Normal case: overhead N means "N-1 data bytes, then a zero"
             (overhead - 1) as usize
         };
 
-        // Validate we have enough data
+        // Validate that the encoded data has enough bytes
         if read_idx + copy_len > len {
             return Err(Error::InvalidDataLength);
         }
 
-        // Copy data bytes
+        // Copy the data bytes from read position to write position
         for _ in 0..copy_len {
             buf[write_idx] = buf[read_idx];
             write_idx += 1;
             read_idx += 1;
         }
 
-        // Write zero after segment (unless overhead was 255)
+        // Write a zero byte after the segment (unless overhead was 255)
+        // The 255 overhead indicates another overhead follows, not a zero
         if overhead != 255 {
             buf[write_idx] = 0;
             write_idx += 1;
@@ -118,13 +192,15 @@ pub fn cobs_decode_in_place(buf: &mut [u8], len: usize) -> Result<usize, Error> 
     }
 
     // Remove the trailing zero that corresponds to the virtual zero added during encoding
-    // The last overhead byte indicates the distance to the virtual zero at the end
+    // The encoder treats the end of input as having a virtual zero to ensure the last
+    // segment gets encoded. We must remove this extra zero to match the original input.
     if last_overhead == Some(1) {
-        // Last overhead was 1, meaning "0 bytes + virtual zero", so remove the trailing zero
+        // Last overhead was 1: "0 data bytes + virtual zero"
+        // We wrote an extra zero we shouldn't have, so remove it
         write_idx -= 1;
     } else if last_overhead.is_some() && last_overhead != Some(255) {
-        // Last overhead was N (where 2 <= N <= 254), meaning "(N-1) bytes + virtual zero"
-        // Remove the trailing zero
+        // Last overhead was N (2-254): "(N-1) data bytes + virtual zero"
+        // We wrote an extra zero after the data, remove it
         write_idx -= 1;
     }
     // If last overhead was 255, no zero was written, so nothing to remove
