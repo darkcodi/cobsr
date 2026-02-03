@@ -1,5 +1,48 @@
 #![no_std]
 
+//! # COBSIN - COBS In-Place Encoding/Decoding
+//!
+//! This library provides in-place COBS (Consistent Overhead Byte Stuffing) encoding
+//! and decoding for `no_std` environments.
+//!
+//! ## Overview
+//!
+//! COBS is an algorithm that transforms data to eliminate zero bytes, making it
+//! suitable for packet-based protocols where zeros are used as delimiters.
+//!
+//! ## Features
+//!
+//! - `no_std` compatible - works in embedded and bare-metal environments
+//! - In-place encoding and decoding - minimal memory overhead
+//! - Zero allocations - no heap required
+//!
+//! ## Functions
+//!
+//! - [`cobs_encode_in_place`] - Encode data in-place, returning the new length
+//! - [`cobs_decode_in_place`] - Decode COBS data in-place, returning the original length
+//! - [`max_overhead`] - Calculate maximum overhead for a given buffer size
+//! - [`required_buf_len`] - Calculate the required buffer size for encoding
+//!
+//! ## Example
+//!
+//! ```rust
+//! use cobsin::{cobs_encode_in_place, cobs_decode_in_place};
+//!
+//! let data = *b"Hello\x00World";
+//! let input_len = data.len();
+//!
+//! // Buffer must be large enough: use a fixed-size array or Vec
+//! let mut buf = [0u8; 32];
+//! buf[..input_len].copy_from_slice(&data);
+//!
+//! // Encode
+//! let encoded_len = cobs_encode_in_place(&mut buf, input_len).unwrap();
+//!
+//! // Decode
+//! let decoded_len = cobs_decode_in_place(&mut buf, encoded_len).unwrap();
+//! assert_eq!(&buf[..decoded_len], b"Hello\x00World");
+//! ```
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Error {
     InvalidDataLength,
