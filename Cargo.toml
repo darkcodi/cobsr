@@ -2,5 +2,12 @@
 name = "cobsin"
 version = "0.1.0"
 edition = "2024"
+description = "COBS encoding/decoding, in-place. `no_std`, zero allocations."
+license = "MIT"
+repository = "https://github.com/darkcodi/cobsin"
+homepage = "https://github.com/darkcodi/cobsin"
+readme = "README.md"
+keywords = ["cobs", "encoding", "decoding", "no_std", "embedded"]
+categories = ["embedded", "encoding", "no-std"]
 
 [dependencies]
