@@ -13,6 +13,7 @@
 - 🔧 **In-place** — encode/decode without extra buffers
 - 📦 **`no_std`** — works on bare-metal & embedded
 - 🚀 **Zero alloc** — no heap, ever
+- 📭 **Zero deps** — no external dependencies
 
 ## 🚀 Quick look
 
